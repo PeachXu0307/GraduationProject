@@ -92,6 +92,7 @@ def apply_scenario(circuit: Any, params: dict[str, Any], base_loads: dict[str, A
         loads.kW = base["kw"] * factor
         loads.kvar = base["kvar"] * factor
         applied[name] = {"bus": base["bus"], "model": base["model"], "phases": base["phases"],
+                         "is_delta": base["is_delta"],
                          "kw": float(loads.kW), "kvar": float(loads.kvar)}
     if params["dg_kw"] > 0:
         # Fixed three-phase PQ injection; no generator exists in the source circuit.
@@ -211,6 +212,7 @@ def run_one(params: dict[str, Any]) -> dict[str, Any]:
             "kw": float(circuit.Loads.kW), "kvar": float(circuit.Loads.kvar),
             "bus": circuit.ActiveCktElement.BusNames[0],
             "model": int(circuit.Loads.Model), "phases": int(circuit.Loads.Phases),
+            "is_delta": bool(circuit.Loads.IsDelta),
         }
     applied_loads = apply_scenario(circuit, params, base_loads)
     circuit.Solution.Solve()
@@ -224,6 +226,14 @@ def run_one(params: dict[str, Any]) -> dict[str, Any]:
             elements.append(element_record(circuit, name))
     buses = bus_records(circuit)
     lines = line_metadata(circuit)
+    transformer_taps = {}
+    for name in circuit.Transformers.AllNames:
+        circuit.Transformers.Name = name
+        taps = []
+        for winding in range(1, circuit.Transformers.NumWindings + 1):
+            circuit.Transformers.Wdg = winding
+            taps.append(float(circuit.Transformers.Tap))
+        transformer_taps[name.lower()] = taps
     residual = kcl_residual(elements)
     record = {
         "sample_id": f"{params['group_id']}_v{params['variant']}",
@@ -235,6 +245,7 @@ def run_one(params: dict[str, Any]) -> dict[str, Any]:
                    "residual_source": "postprocessed_element_terminal_kcl"},
         "loads_base": base_loads,
         "loads_applied": applied_loads,
+        "transformer_taps_after_solve": transformer_taps,
         "buses": buses,
         "elements": elements,
         "lines": lines,
