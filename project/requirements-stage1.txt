@@ -1,0 +1,5 @@
+dss-python==0.15.7
+numpy==2.5.4
+pandas==2.3.3
+matplotlib==3.11.2
+pytest==8.4.2
