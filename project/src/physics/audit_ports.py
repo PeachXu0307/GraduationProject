@@ -42,6 +42,40 @@ def yprim_current(circuit,name):
     v=element_voltages(circuit,e)
     return y@v,complex_pairs(e.Currents)
 
+def source_current(circuit,name):
+    """Norton current for the three-phase Thevenin voltage source.
+
+    This IEEE-13 source has three phase conductors and three ground-return
+    slots. Its Yprim is linear, while its nonzero Norton injection comes from
+    the declared source kV, pu and angle. No solved source current is used.
+    """
+    circuit.Vsources.Name=name
+    circuit.SetActiveElement('Vsource.'+name)
+    e=circuit.ActiveCktElement
+    n=int(e.NumConductors*e.NumTerminals)
+    if e.NumPhases != 3 or e.NumTerminals != 2 or n != 6:
+        raise ValueError(f'Unsupported source connection: {name}')
+    y=complex_pairs(e.Yprim).reshape(n,n)
+    v=element_voltages(circuit,e)
+    theta=np.deg2rad(circuit.Vsources.AngleDeg-120*np.arange(3))
+    emf=circuit.Vsources.BasekV*1000*circuit.Vsources.pu/np.sqrt(3)*np.exp(1j*theta)
+    norton=y[:3,:3]@emf
+    injection=np.concatenate([norton,-norton])
+    return y@v-injection,complex_pairs(e.Currents)
+
+def generator_current(circuit,name):
+    """Constant-PQ wye generator terminal current for the present feeder."""
+    circuit.Generators.Name=name
+    circuit.SetActiveElement('Generator.'+name)
+    e=circuit.ActiveCktElement
+    if e.NumPhases != 3 or circuit.Generators.IsDelta or circuit.Generators.Model != 1:
+        raise ValueError(f'Unsupported generator model: {name}')
+    v=element_voltages(circuit,e)
+    s=complex(circuit.Generators.kW,circuit.Generators.kvar)*1000/3
+    phases=-np.conj(s/v[:3])
+    calc=np.concatenate([phases,[-phases.sum()]])
+    return calc,complex_pairs(e.Currents)
+
 def load_current(circuit,name):
     loads=circuit.Loads; loads.Name=name
     circuit.SetActiveElement('Load.'+name);e=circuit.ActiveCktElement
@@ -69,19 +103,24 @@ def load_current(circuit,name):
     elif model==5:
         ib=np.conj(power_per_branch)/nominal*branch_v/np.abs(branch_v)
     else: raise ValueError(f'Unsupported load model {model}: {name}')
-    # OpenDSS switches Model 1 and 5 to constant impedance outside their
-    # Vminpu/Vmaxpu band, matching the current continuously at the boundary.
+    # OpenDSS interpolates current between Vlowpu and Vminpu. Model 1 joins
+    # the constant-PQ current at Vminpu; Model 5 joins its nominal-magnitude
+    # constant-current relation there. These are different boundary values.
     if model in {1,5}:
         magnitude=np.abs(branch_v)
         lower=loads.Vminpu*nominal
         upper=loads.Vmaxpu*nominal
-        boundary=np.where(magnitude<lower,lower,np.where(magnitude>upper,upper,magnitude))
-        below_or_above=(magnitude<lower)|(magnitude>upper)
-        if model==1:
-            fallback=np.conj(power_per_branch)/(boundary**2)*branch_v
-        else:
-            fallback=np.conj(power_per_branch)/(nominal*boundary)*branch_v
-        ib=np.where(below_or_above,fallback,ib)
+        vlow=0.5*nominal
+        yeq=np.conj(power_per_branch)/(nominal**2)
+        yeq_low=yeq
+        yeq_min=yeq/(loads.Vminpu**2) if model==1 else yeq/loads.Vminpu
+        ilow=yeq_low*vlow
+        imin=yeq_min*lower
+        slope=(imin-ilow)/(lower-vlow)
+        interpolated=(ilow+slope*(magnitude-vlow))/magnitude*branch_v
+        ib=np.where(magnitude<=vlow,yeq_low*branch_v,ib)
+        ib=np.where((magnitude>vlow)&(magnitude<=lower),interpolated,ib)
+        ib=np.where(magnitude>upper,yeq/(loads.Vmaxpu**2)*branch_v,ib)
     calc=mapping@ib
     obs=complex_pairs(e.Currents)[:len(calc)]
     return calc,obs,model,delta
@@ -93,6 +132,7 @@ def base_loads(circuit):
         circuit.SetActiveElement('Load.'+name)
         out[name]={'kw':float(circuit.Loads.kW),'kvar':float(circuit.Loads.kvar),
                    'bus':circuit.ActiveCktElement.BusNames[0],
+                   'kv':float(circuit.Loads.kV),
                    'model':int(circuit.Loads.Model),'phases':int(circuit.Loads.Phases),
                    'is_delta':bool(circuit.Loads.IsDelta)}
     return out
@@ -115,6 +155,14 @@ def audit_one(params):
         elif kind=='load':
             calc,obs,model,delta=load_current(circuit,name.split('.')[1])
             rows.append({'element':name.lower(),'kind':kind,'method':f'model{model}_{"delta" if delta else "wye"}',
+                         'relative_error':rel_error(calc,obs)})
+        elif kind=='generator':
+            calc,obs=generator_current(circuit,name.split('.')[1])
+            rows.append({'element':name.lower(),'kind':kind,'method':'generator_PQ_wye',
+                         'relative_error':rel_error(calc,obs)})
+        elif kind=='vsource':
+            calc,obs=source_current(circuit,name.split('.')[1])
+            rows.append({'element':name.lower(),'kind':kind,'method':'source_Norton',
                          'relative_error':rel_error(calc,obs)})
     return rows
 

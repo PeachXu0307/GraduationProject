@@ -31,3 +31,17 @@ def test_masks_and_group_splits():
         assert torch.allclose(masked_complex_mse(output, batch), masked_complex_mse(changed, batch))
         metrics = evaluate(model, DataLoader(split["val"][:2], batch_size=2), torch.device("cpu"))
         assert metrics["phase_observations"] == 82
+
+
+def test_fixed_tap_graphs_preserve_double_precision():
+    split, top, bases = load_data(ROOT / "data/graphs/ieee13_fixed_taps",
+                                  ROOT / "data/raw/ieee13_fixed_taps")
+    assert [len(split[k]) for k in split] == [720, 90, 45, 45]
+    assert split["train"][0].x.dtype == torch.float64
+    assert split["train"][0].y.dtype == torch.float64
+    assert bases.dtype == torch.float64
+    batch = Batch.from_data_list(split["train"][:2])
+    model = make_model("edge_gnn", len(top["bus_names"])).double()
+    pred = model(batch)
+    assert pred.dtype == torch.float64 and pred.shape == batch.y.shape
+    assert torch.isfinite(masked_complex_mse(pred, batch))

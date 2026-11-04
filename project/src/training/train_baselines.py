@@ -34,7 +34,7 @@ def load_data(graph_dir: Path, raw_dir: Path):
     for b in rows[0]["buses"]:
         if b["bus"] in base: assert abs(base[b["bus"]] - b["v_base_ln_kv"]) < 1e-10
         base[b["bus"]] = b["v_base_ln_kv"]
-    bases = torch.tensor([base[name] * 1000 for name in top["bus_names"]], dtype=torch.float32)
+    bases = torch.tensor([base[name] * 1000 for name in top["bus_names"]], dtype=graphs[0].y.dtype)
     # Graphs share a fixed bus order and voltage bases. Scaling each bus by its
     # line-neutral base prevents 115-kV and 480-V buses from dominating loss.
     for g in graphs:
@@ -79,7 +79,8 @@ def evaluate(model, loader, device: torch.device) -> dict:
 
 
 def train_one(name: str, split: dict, num_buses: int, args, device: torch.device) -> dict:
-    model = make_model(name, num_buses).to(device)
+    floating_dtype = split["train"][0].x.dtype
+    model = make_model(name, num_buses).to(device=device, dtype=floating_dtype)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     train_loader = DataLoader(split["train"], batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(split["val"], batch_size=args.batch_size, shuffle=False)
@@ -142,6 +143,7 @@ def main() -> None:
     report = {"config": {"seed": a.seed, "epochs": a.epochs, "patience": a.patience,
                          "batch_size": a.batch_size, "lr": a.lr, "weight_decay": a.weight_decay,
                          "device": str(device), "torch": torch.__version__, "voltage_bases_v": bases.tolist()},
+              "graph_dtype": str(split["train"][0].x.dtype),
               "results": results}
     (a.out/"metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(results, indent=2))

@@ -22,6 +22,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 CIRCUIT = ROOT / "networks" / "ieee13" / "IEEE13Nodeckt.dss"
 PHASES = {1: "A", 2: "B", 3: "C"}
+FIXED_REGULATOR_TAPS = {"reg1": 1.0625, "reg2": 1.0500, "reg3": 1.06875}
 
 
 def pairs(values: Any) -> list[list[float]]:
@@ -93,6 +94,7 @@ def apply_scenario(circuit: Any, params: dict[str, Any], base_loads: dict[str, A
         loads.kvar = base["kvar"] * factor
         applied[name] = {"bus": base["bus"], "model": base["model"], "phases": base["phases"],
                          "is_delta": base["is_delta"],
+                         "kv": base["kv"],
                          "kw": float(loads.kW), "kvar": float(loads.kvar)}
     if params["dg_kw"] > 0:
         # Fixed three-phase PQ injection; no generator exists in the source circuit.
@@ -198,7 +200,9 @@ def line_metadata(circuit: Any) -> list[dict[str, Any]]:
     return out
 
 
-def run_one(params: dict[str, Any]) -> dict[str, Any]:
+def run_one(params: dict[str, Any], tap_policy: str = "regulated") -> dict[str, Any]:
+    if tap_policy not in {"regulated", "fixed"}:
+        raise ValueError(f"Unknown tap policy: {tap_policy}")
     dss.DSS.Text.Command = f'Compile "{CIRCUIT}"'
     circuit = dss.DSS.ActiveCircuit
     # The source circuit contains a Solve and establishes baseline regulator taps.
@@ -213,8 +217,17 @@ def run_one(params: dict[str, Any]) -> dict[str, Any]:
             "bus": circuit.ActiveCktElement.BusNames[0],
             "model": int(circuit.Loads.Model), "phases": int(circuit.Loads.Phases),
             "is_delta": bool(circuit.Loads.IsDelta),
+            "kv": float(circuit.Loads.kV),
         }
     applied_loads = apply_scenario(circuit, params, base_loads)
+    if tap_policy == "fixed":
+        # Published alternate IEEE-13 setting. These are declared input taps,
+        # never copied from the regulated solution's post-solve tap labels.
+        for name, tap in FIXED_REGULATOR_TAPS.items():
+            circuit.Transformers.Name = name
+            circuit.Transformers.Wdg = 2
+            circuit.Transformers.Tap = tap
+        dss.DSS.Text.Command = "Set Controlmode=OFF"
     circuit.Solution.Solve()
     solution = circuit.Solution
     converged = bool(solution.Converged)
@@ -251,6 +264,9 @@ def run_one(params: dict[str, Any]) -> dict[str, Any]:
         "lines": lines,
         "kcl_residual": residual,
     }
+    if tap_policy == "fixed":
+        record["tap_policy"] = {"name": "fixed", "control_mode": "OFF",
+                                "declared_regulator_taps": FIXED_REGULATOR_TAPS.copy()}
     if not finite_tree(record):
         raise ValueError(f"Nonfinite data in {record['sample_id']}")
     return record
@@ -262,6 +278,7 @@ def main() -> None:
     parser.add_argument("--groups", type=int, default=300)
     parser.add_argument("--variants", type=int, default=3)
     parser.add_argument("--seed", type=int, default=20261102)
+    parser.add_argument("--tap-policy", choices=("regulated", "fixed"), default="regulated")
     args = parser.parse_args()
     if not 286 <= args.groups <= 300 or args.variants < 1:
         parser.error("groups must be 286..300 to preserve all predefined splits")
@@ -271,7 +288,7 @@ def main() -> None:
     records = []
     for group in range(args.groups):
         for variant in range(args.variants):
-            records.append(run_one(scenario(group, variant, args.seed)))
+            records.append(run_one(scenario(group, variant, args.seed), tap_policy=args.tap_policy))
     with (args.out / "samples.jsonl").open("w", encoding="utf-8") as f:
         for row in records:
             f.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
@@ -313,6 +330,8 @@ def main() -> None:
         "seed": args.seed, "groups": args.groups, "variants": args.variants,
         "samples": len(records), "source_dss_sha256": hashlib.sha256(CIRCUIT.read_bytes()).hexdigest(),
         "dss_version": dss.DSS.Version.strip(),
+        "tap_policy": args.tap_policy,
+        "declared_regulator_taps": FIXED_REGULATOR_TAPS if args.tap_policy == "fixed" else None,
         "split_rule": "groups 0-239 train, 240-269 val, 270-284 ordinary test, 285-299 stress test",
         "notes": "KCL residual is postprocessed, not a solver-reported residual. No topology changes or parameter missingness in version 1.",
     }

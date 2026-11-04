@@ -71,7 +71,7 @@ def node_features(sample: dict, buses: list[str]) -> tuple[np.ndarray, np.ndarra
     # x: mask(3), approximate injection P(3) MW, Q(3) MVAr,
     # source flag, load flag, DG flag, capacitor flag = 13 columns.
     x = np.zeros((len(buses), 13), dtype=np.float32)
-    y = np.zeros((len(buses), 6), dtype=np.float32)  # Re/Im volts for A/B/C
+    y = np.zeros((len(buses), 6), dtype=np.float64)  # Preserve OpenDSS Re/Im volts.
     mask = np.zeros((len(buses), 3), dtype=np.float32)
     for b in sample["buses"]:
         i, p = idx[b["bus"]], PHASES[b["node"]]
@@ -128,11 +128,13 @@ def branch_features(top: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return np.asarray(edges, np.int64).T, np.asarray(attrs, np.float32), np.asarray(ids, np.int64)
 
 
-def build(sample: dict, top: dict) -> Data:
+def build(sample: dict, top: dict, floating_dtype: torch.dtype = torch.float32) -> Data:
     x, y, mask = node_features(sample, top["bus_names"])
     ei, ea, ids = branch_features(top)
-    return Data(x=torch.from_numpy(x), y=torch.from_numpy(y), phase_mask=torch.from_numpy(mask),
-                edge_index=torch.from_numpy(ei), edge_attr=torch.from_numpy(ea),
+    return Data(x=torch.from_numpy(x).to(floating_dtype),
+                y=torch.from_numpy(y).to(floating_dtype),
+                phase_mask=torch.from_numpy(mask).to(floating_dtype),
+                edge_index=torch.from_numpy(ei), edge_attr=torch.from_numpy(ea).to(floating_dtype),
                 branch_id=torch.from_numpy(ids), sample_id=sample["sample_id"])
 
 
@@ -140,12 +142,14 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--raw", type=Path, default=ROOT/"data/raw/ieee13")
     p.add_argument("--out", type=Path, default=ROOT/"data/graphs/ieee13")
+    p.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     a = p.parse_args(); a.out = a.out.resolve(); a.out.mkdir(parents=True, exist_ok=True)
     rows = [json.loads(s) for s in (a.raw/"samples.jsonl").read_text(encoding="utf-8").splitlines()]
     top = topology(rows[0])
-    graphs = [build(r, top) for r in rows]
+    floating_dtype = torch.float64 if a.dtype == "float64" else torch.float32
+    graphs = [build(r, top, floating_dtype) for r in rows]
     torch.save(graphs, a.out/"graphs.pt")
     (a.out/"topology.json").write_text(json.dumps(top, indent=2), encoding="utf-8")
-    print(f"graphs={len(graphs)} x={tuple(graphs[0].x.shape)} edge_index={tuple(graphs[0].edge_index.shape)} edge_attr={tuple(graphs[0].edge_attr.shape)}")
+    print(f"graphs={len(graphs)} dtype={a.dtype} x={tuple(graphs[0].x.shape)} edge_index={tuple(graphs[0].edge_index.shape)} edge_attr={tuple(graphs[0].edge_attr.shape)}")
 
 if __name__ == "__main__": main()
